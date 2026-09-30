@@ -122,28 +122,35 @@ dependencies {
     compileOnly "maven.modrinth:vivecraft:${vivecraft_version}"
 
     // Libraries used by Voxy's storage backends and importers.
+    //
+    // Only a floor is declared, never a hard pin. NeoForge's JarSelector intersects the
+    // ranges of every mod that bundles the same artifact and fails the whole launch with
+    // VERSION_RESOLUTION_FAILED when the intersection is empty, so a pinned range such
+    // as strictly '[3.49.1.0]' makes Voxy incompatible with any mod that wants a newer
+    // version. 'prefer' alone emits an open range ([<version>,)) and lets the selector
+    // pick a version every bundled copy can live with.
     jarJar(implementation('redis.clients:jedis:5.1.0')) {
-        version { strictly '[5.1.0]'; prefer '5.1.0' }
+        version { prefer '5.1.0' }
     }
     if (project.findProperty('includeOtherArchs')?.toBoolean()) {
         jarJar(implementation('org.rocksdb:rocksdbjni:10.2.1')) {
-            version { strictly '[10.2.1]'; prefer '10.2.1' }
+            version { prefer '10.2.1' }
         }
     } else {
         implementation('org.rocksdb:rocksdbjni:10.2.1')
         rocksdbInternal('org.rocksdb:rocksdbjni:10.2.1')
     }
     jarJar(implementation('org.apache.commons:commons-pool2:2.12.0')) {
-        version { strictly '[2.12.0]'; prefer '2.12.0' }
+        version { prefer '2.12.0' }
     }
     jarJar(implementation('org.lz4:lz4-java:1.8.0')) {
-        version { strictly '[1.8.0]'; prefer '1.8.0' }
+        version { prefer '1.8.0' }
     }
     jarJar(implementation('org.tukaani:xz:1.10')) {
-        version { strictly '[1.10]'; prefer '1.10' }
+        version { prefer '1.10' }
     }
     jarJar(runtimeOnly('org.xerial:sqlite-jdbc:3.49.1.0')) {
-        version { strictly '[3.49.1.0]'; prefer '3.49.1.0' }
+        version { prefer '3.49.1.0' }
     }
 
     // Voxy uses these LWJGL bindings for memory-mapped storage and compression.
@@ -189,7 +196,11 @@ lwjglBindings.each { binding ->
         // (META-INF/<platform>/.../*.sha1) - byte identical, so the first one wins.
         duplicatesStrategy = DuplicatesStrategy.EXCLUDE
         manifest {
-            attributes('Automatic-Module-Name': "lwjgl.${binding}")
+            // Namespaced so the jar-in-jar identifier and the JPMS module name cannot
+            // collide with another mod that happens to bundle the same binding. The LWJGL
+            // module name is irrelevant to native loading: LibraryResource builds its
+            // resource path from the binding's own package, not from this value.
+            attributes('Automatic-Module-Name': "me.cortex.voxy.lwjgl.${binding}")
         }
         from(provider {
             lwjglBindingNativesFiles.findAll { it.name.startsWith(prefix) }.collect { zipTree(it) }
@@ -213,7 +224,12 @@ if (!project.findProperty('includeOtherArchs')?.toBoolean()) {
         from { zipTree(configurations.rocksdbInternal.singleFile) }
         archiveFileName.set(providers.provider { configurations.rocksdbInternal.singleFile.name })
         manifest {
-            attributes('Automatic-Module-Name': 'org.rocksdb')
+            // Repacked jars are declared through files(), so ModDevGradle cannot derive a
+            // real version and pins the range to this archive's content hash. The
+            // identifier therefore has to be unique to Voxy: another mod bundling
+            // rocksdbjni the same way would claim ':org.rocksdb' with a different hash and
+            // JarSelector would reject the launch with VERSION_RESOLUTION_FAILED.
+            attributes('Automatic-Module-Name': 'me.cortex.voxy.rocksdb')
         }
         exclude { details ->
             def fileName = details.name
