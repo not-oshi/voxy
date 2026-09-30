@@ -133,18 +133,29 @@ dependencies {
     }
 
     // Voxy uses these LWJGL bindings for memory-mapped storage and compression.
+    // Minecraft already puts lwjgl (core, opengl, glfw and the platform natives) on
+    // the game classpath, so only the LWJGL extensions Voxy loads itself get nested.
     implementation platform("org.lwjgl:lwjgl-bom:${lwjgl_version}")
-    jarJar(implementation("org.lwjgl:lwjgl:${lwjgl_version}:unsafe")) {
+    // Compile-only on purpose: nesting a second copy of the core jar breaks NeoForge's
+    // jar-in-jar module layer. lwjgl ships its module descriptor inside the
+    // multi-release section (META-INF/versions/25/module-info.class), where it exports
+    // org.lwjgl.system.ffm - a package that exists only in that same section and is
+    // absent from the jar root - so the nested copy resolves to a module with a
+    // dangling export.
+    compileOnly "org.lwjgl:lwjgl:${lwjgl_version}:unsafe"
+    // The lwjgl-lmdb / lwjgl-zstd POMs depend on org.lwjgl:lwjgl; drop it so the core
+    // jar cannot be pulled into the nested set again through transitivity.
+    jarJar(implementation("org.lwjgl:lwjgl-lmdb:${lwjgl_version}") {
+        exclude group: 'org.lwjgl', module: 'lwjgl'
+    }) {
         version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
     }
-    jarJar(implementation("org.lwjgl:lwjgl-lmdb:${lwjgl_version}")) {
-        version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
-    }
-    jarJar(implementation("org.lwjgl:lwjgl-zstd:${lwjgl_version}")) {
+    jarJar(implementation("org.lwjgl:lwjgl-zstd:${lwjgl_version}") {
+        exclude group: 'org.lwjgl', module: 'lwjgl'
+    }) {
         version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
     }
     ['windows', 'linux'].each { os ->
-        runtimeOnly("org.lwjgl:lwjgl:${lwjgl_version}:natives-${os}")
         jarJar(runtimeOnly("org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-${os}")) {
             version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
         }
@@ -155,7 +166,6 @@ dependencies {
 
     if (project.findProperty('includeOtherArchs')?.toBoolean()) {
         ['linux-arm64'].each { os ->
-            runtimeOnly("org.lwjgl:lwjgl:${lwjgl_version}:natives-${os}")
             jarJar(runtimeOnly("org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-${os}")) {
                 version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
             }
@@ -197,6 +207,10 @@ tasks.withType(JavaCompile).configureEach {
     options.deprecation = true
 }
 
+// Resolved during configuration: reading project state from inside the rename closure
+// would run at execution time and is rejected by the configuration cache.
+def licenseFileSuffix = "_${project.archives_base_name}"
+
 tasks.named('jar', Jar).configure {
     manifest {
         attributes(
@@ -205,7 +219,7 @@ tasks.named('jar', Jar).configure {
         )
     }
     from('LICENSE.md') {
-        rename { "${it}_${project.archives_base_name}" }
+        rename { "${it}${licenseFileSuffix}" }
     }
 }
 
