@@ -28,6 +28,20 @@ repositories {
 
 configurations {
     rocksdbInternal
+    // Platform natives for the LWJGL bindings Voxy ships. They end up inside the
+    // nested jar of their binding instead of being nested on their own - see the
+    // bundling tasks further down for why that matters.
+    lwjglBindingNatives {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+    runtimeClasspath.extendsFrom lwjglBindingNatives
+}
+
+def lwjglBindings = ['lmdb', 'zstd']
+def lwjglBindingPlatforms = ['windows', 'linux']
+if (project.findProperty('includeOtherArchs')?.toBoolean()) {
+    lwjglBindingPlatforms += 'linux-arm64'
 }
 
 java {
@@ -145,34 +159,51 @@ dependencies {
     compileOnly "org.lwjgl:lwjgl:${lwjgl_version}:unsafe"
     // The lwjgl-lmdb / lwjgl-zstd POMs depend on org.lwjgl:lwjgl; drop it so the core
     // jar cannot be pulled into the nested set again through transitivity.
-    jarJar(implementation("org.lwjgl:lwjgl-lmdb:${lwjgl_version}") {
-        exclude group: 'org.lwjgl', module: 'lwjgl'
-    }) {
-        version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
-    }
-    jarJar(implementation("org.lwjgl:lwjgl-zstd:${lwjgl_version}") {
-        exclude group: 'org.lwjgl', module: 'lwjgl'
-    }) {
-        version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
-    }
-    ['windows', 'linux'].each { os ->
-        jarJar(runtimeOnly("org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-${os}")) {
-            version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
+    lwjglBindings.each { binding ->
+        implementation("org.lwjgl:lwjgl-${binding}:${lwjgl_version}") {
+            exclude group: 'org.lwjgl', module: 'lwjgl'
         }
-        jarJar(runtimeOnly("org.lwjgl:lwjgl-zstd:${lwjgl_version}:natives-${os}")) {
-            version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
+        lwjglBindingNatives("org.lwjgl:lwjgl-${binding}:${lwjgl_version}") {
+            exclude group: 'org.lwjgl', module: 'lwjgl'
+        }
+        lwjglBindingPlatforms.each { os ->
+            lwjglBindingNatives("org.lwjgl:lwjgl-${binding}:${lwjgl_version}:natives-${os}")
         }
     }
+}
 
-    if (project.findProperty('includeOtherArchs')?.toBoolean()) {
-        ['linux-arm64'].each { os ->
-            jarJar(runtimeOnly("org.lwjgl:lwjgl-lmdb:${lwjgl_version}:natives-${os}")) {
-                version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
-            }
-            jarJar(runtimeOnly("org.lwjgl:lwjgl-zstd:${lwjgl_version}:natives-${os}")) {
-                version { strictly "[${lwjgl_version}]"; prefer lwjgl_version }
-            }
+// LWJGL publishes every platform native as a separate artifact that shares the Maven
+// coordinates of the binding itself (org.lwjgl:lwjgl-zstd:3.4.1:natives-windows, ...),
+// so they cannot be distinguished inside a jar-in-jar set: NeoForge's JarSelector keeps
+// exactly one nested jar per group:artifact - select() picks a single winner with
+// findFirst() and silently drops the rest. Nesting a binding and its natives separately
+// therefore loses two thirds of them at runtime, which is what left
+// org.lwjgl.util.zstd.Zstd missing. Merge each binding together with all of its platform
+// natives into one nested jar so a single entry carries the whole binding.
+def lwjglBindingNativesFiles = configurations.lwjglBindingNatives
+lwjglBindings.each { binding ->
+    def prefix = "lwjgl-${binding}-${lwjgl_version}"
+    def bundleTask = tasks.register("bundleLwjgl${binding.capitalize()}", Jar) {
+        archiveFileName.set("${prefix}.jar")
+        // The binding jar and its natives jars both carry the same platform checksums
+        // (META-INF/<platform>/.../*.sha1) - byte identical, so the first one wins.
+        duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+        manifest {
+            attributes('Automatic-Module-Name': "lwjgl.${binding}")
         }
+        from(provider {
+            lwjglBindingNativesFiles.findAll { it.name.startsWith(prefix) }.collect { zipTree(it) }
+        })
+        // Two copies of the same metadata would collide inside the merged jar.
+        exclude 'META-INF/MANIFEST.MF'
+        exclude 'META-INF/INDEX.LIST'
+        // Drop the multi-release module descriptors: the packages they export are kept,
+        // but FML reads the descriptor without the versioned section and would end up
+        // with a module whose exports do not line up with the jar.
+        exclude 'META-INF/versions/**'
+    }
+    dependencies {
+        jarJar files(bundleTask)
     }
 }
 
